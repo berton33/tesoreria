@@ -1,0 +1,16 @@
+{
+  "name": "tesoreria-logia",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Sistema de tesorería y padrón de miembros",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "nodemailer": "^7.0.0"
+  }
+}
