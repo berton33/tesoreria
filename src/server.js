@@ -44,7 +44,7 @@ app.post('/api/logout', (req, res) => {
 const api = express.Router();
 app.use('/api', api);
 api.use((req, res, next) => {
-  if (req.method !== 'GET' && !req.is('application/json') && req.method !== 'DELETE')
+  if (req.method !== 'GET' && !req.is('application/json') && req.method !== 'DELETE' && req.path !== '/restaurar')
     return res.status(415).json({ error: 'Formato no admitido' });
   next();
 });
@@ -77,6 +77,9 @@ api.get('/config', (req, res) => {
   delete c.ultimo_devengo_auto;
   res.json(c);
 });
+api.get('/config/cambio-cuota', admin, (req, res) =>
+  res.json(L.previsualizarCambioCuota(L.aCentavos(String(req.query.valor || ''))))
+);
 api.put('/config', admin, (req, res) => {
   const b = req.body || {};
   for (const k of CLAVES_CONFIG) {
@@ -95,7 +98,7 @@ api.put('/config', admin, (req, res) => {
   if ('cuota_base' in b) {
     const c = L.aCentavos(b.cuota_base);
     if (!(c > 0)) throw new L.ErrorUsuario('Valor de cuota inválido');
-    setConfig('cuota_base', c);
+    L.cambiarCuota(c, req.usuario.nombre);
   }
   res.json(getConfig());
 });
@@ -176,6 +179,7 @@ api.get('/movimientos', (req, res) => res.json(L.listarMovimientos(req.query)));
 api.post('/movimientos', admin, (req, res) => {
   const b = req.body || {};
   if (b.tipo === 'devengo') throw new L.ErrorUsuario('Los devengamientos se generan desde "Devengar cuotas"');
+  if (L.TIPOS[b.tipo]?.sistema) throw new L.ErrorUsuario('Ese movimiento lo genera el sistema');
   res.json(L.crearMovimiento(b, req.usuario.nombre));
 });
 api.post('/movimientos/:id/anular', admin, (req, res) => {
@@ -236,6 +240,48 @@ api.post('/importar/analizar', admin, (req, res) => {
 });
 api.post('/importar', admin, (req, res) => res.json(importarResumen(String(req.body?.csv || ''), req.usuario.nombre)));
 
+// Restaura padrón, categorías, movimientos y configuración desde un respaldo (.db).
+// Solo con el sistema vacío; los usuarios no se copian.
+api.post('/restaurar', admin, express.raw({ type: 'application/octet-stream', limit: '100mb' }), (req, res) => {
+  if (db.prepare('SELECT COUNT(*) n FROM miembros').get().n > 0)
+    throw new L.ErrorUsuario('La restauración solo se puede hacer con el sistema vacío (sin miembros cargados).', 409);
+  const datos = req.body;
+  if (!Buffer.isBuffer(datos) || datos.length < 100 || datos.subarray(0, 15).toString('latin1') !== 'SQLite format 3')
+    throw new L.ErrorUsuario('El archivo no es un respaldo válido');
+  const tmp = path.join(DATA_DIR, `restaurar_${Date.now()}.db`);
+  fs.writeFileSync(tmp, datos);
+  let adjunta = false;
+  try {
+    db.exec(`ATTACH DATABASE '${tmp.replace(/'/g, "''")}' AS r`);
+    adjunta = true;
+    const tablas = db.prepare("SELECT name FROM r.sqlite_master WHERE type = 'table'").all().map((t) => t.name);
+    for (const t of ['config', 'categorias', 'miembros', 'movimientos'])
+      if (!tablas.includes(t)) throw new L.ErrorUsuario('El archivo no es un respaldo de este sistema');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec(`
+        DELETE FROM movimientos; DELETE FROM miembros; DELETE FROM categorias;
+        INSERT INTO categorias (id, nombre, porcentaje) SELECT id, nombre, porcentaje FROM r.categorias;
+        INSERT INTO miembros (id, nombre, apellido, telefono, email, categoria_id, estado, notas, creado_en)
+          SELECT id, nombre, apellido, telefono, email, categoria_id, estado, notas, creado_en FROM r.miembros;
+        INSERT INTO movimientos (id, fecha, tipo, miembro_id, concepto, periodo, efecto_caja, efecto_saco, efecto_miembro, anulado, anulado_motivo, usuario, creado_en)
+          SELECT id, fecha, tipo, miembro_id, concepto, periodo, efecto_caja, efecto_saco, efecto_miembro, anulado, anulado_motivo, usuario, creado_en FROM r.movimientos;
+        INSERT INTO config (clave, valor) SELECT clave, valor FROM r.config WHERE true
+          ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor;
+      `);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+  } finally {
+    if (adjunta) db.exec('DETACH DATABASE r');
+    fs.rmSync(tmp, { force: true });
+  }
+  const r = L.resumen();
+  res.json({ miembros: r.capitantes + r.bajas, caja: r.caja, deuda: r.deuda });
+});
+
 api.get('/respaldo', admin, (req, res) => {
   const destino = path.join(DATA_DIR, `respaldo_${Date.now()}.db`);
   db.exec(`VACUUM INTO '${destino.replace(/'/g, "''")}'`);
@@ -260,7 +306,7 @@ api.delete('/usuarios/:id', admin, (req, res) => {
 api.use((req, res) => res.status(404).json({ error: 'No encontrado' }));
 
 // ---------- Interfaz ----------
-app.use(express.static(PUBLIC, { maxAge: '1h', index: 'index.html' }));
+app.use(express.static(PUBLIC, { maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0, index: 'index.html' }));
 app.get(/^(?!\/api\/).*/, (req, res) => res.sendFile(path.join(PUBLIC, 'index.html')));
 
 // ---------- Errores ----------

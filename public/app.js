@@ -112,7 +112,7 @@ const RUTAS = [
   ['#/', 'Inicio'],
   ['#/miembros', 'Miembros'],
   ['#/movimientos', 'Movimientos'],
-  ['#/informe', 'Informe'],
+  ['#/informe', 'Devengo e informe'],
   ['#/config', 'Configuración'],
 ];
 
@@ -207,6 +207,7 @@ const TIPOS = {
   ajuste_caja: { nombre: 'Ajuste de caja', signo: true, ayuda: 'Positivo suma a la caja, negativo resta.' },
   ajuste_saco: { nombre: 'Ajuste Saco de la Viuda', signo: true, ayuda: 'Positivo suma al Saco, negativo resta.' },
   devengo: { nombre: 'Devengamiento de cápita', oculto: true },
+  actualizacion_cuota: { nombre: 'Actualización por cambio de cuota', oculto: true },
 };
 
 async function abrirMovimiento(tipoInicial, miembroId) {
@@ -371,7 +372,8 @@ async function vistaInicio() {
           h('button', { onclick: () => abrirMovimiento('otro_ingreso') }, 'Otro ingreso'),
           h('button', { onclick: () => abrirMovimiento('deuda_adicional') }, 'Deuda adicional'),
           h('button', { onclick: () => abrirMovimiento('saco_ingreso') }, 'Ingreso Saco'),
-          h('button', { onclick: () => abrirMovimiento('saco_egreso') }, 'Egreso Saco')
+          h('button', { onclick: () => abrirMovimiento('saco_egreso') }, 'Egreso Saco'),
+          h('button', { onclick: () => (location.hash = '#/informe') }, 'Devengar cuotas')
         )
       ),
     h('div', { class: 'panel' }, h('div', { class: 'fila entre' }, h('h2', {}, 'Últimos movimientos'), h('a', { href: '#/movimientos', class: 'small' }, 'Ver todos')), tablaMovimientos(movs.filas)),
@@ -637,7 +639,7 @@ async function vistaInforme() {
     });
 
   return [
-    h('h1', { class: 'no-print' }, 'Informe mensual'),
+    h('h1', { class: 'no-print' }, 'Devengamiento e informe mensual'),
     esAdmin() &&
       h(
         'div',
@@ -681,6 +683,7 @@ async function vistaConfig() {
             campo('Nombre de la logia', ctl.nombre_logia),
             h('div', { class: 'dos' }, campo('Venerable Maestro', ctl.venerable), campo('Tesorero', ctl.tesorero)),
             h('div', { class: 'dos' }, campo('Valor de la cuota ($)', ctl.cuota_base), campo('Día del mes para devengar (1 a 28)', ctl.dia_devengo)),
+            h('div', { class: 'small muted' }, 'Al cambiar la cuota, la deuda pendiente de cada hermano se actualiza al valor nuevo (quien debía 3 cuotas sigue debiendo 3 cuotas). Los saldos a favor quedan en pesos.'),
             h('div', { class: 'dos' }, campo('Art. 201 a partir de (cuotas adeudadas)', ctl.umbral_art201), campo('Listar en el informe deudas mayores a (cuotas)', ctl.umbral_informe)),
             h('label', { class: 'check', style: 'margin-top:14px' }, auto, 'Devengar las cuotas automáticamente cada mes'),
             h('label', { class: 'check' }, mailDev, `Enviar mail a cada miembro al devengar${S.mail ? '' : ' (requiere configurar SMTP en el servidor)'}`),
@@ -693,8 +696,20 @@ async function vistaConfig() {
             for (const [k, el] of Object.entries(ctl)) b[k] = el.value;
             b.umbral_art201 = b.umbral_art201.replace(',', '.');
             b.umbral_informe = b.umbral_informe.replace(',', '.');
+            const p = await api('GET', '/config/cambio-cuota?valor=' + encodeURIComponent(b.cuota_base));
+            if (p.cuota_nueva !== p.cuota_actual) {
+              const sube = p.diferencia >= 0;
+              const ok = confirm(
+                `Vas a cambiar la cuota de ${plata(p.cuota_actual)} a ${plata(p.cuota_nueva)}.\n\n` +
+                  (p.afectados
+                    ? `Se actualiza la deuda de ${p.afectados} hermanos en la misma proporción: la deuda total ${sube ? 'sube' : 'baja'} ${plata(Math.abs(p.diferencia))}.\n`
+                    : 'Ningún hermano tiene deuda para actualizar.\n') +
+                  'Los saldos a favor no cambian.\n\n¿Confirmás?'
+              );
+              if (!ok) return;
+            }
             await api('PUT', '/config', b);
-            toast('Configuración guardada');
+            toast(p.cuota_nueva !== p.cuota_actual && p.afectados ? `Cuota actualizada y ${p.afectados} deudas ajustadas` : 'Configuración guardada');
             render();
           }
         )
@@ -721,6 +736,7 @@ async function vistaConfig() {
         'div',
         { class: 'panel' },
         h('div', { class: 'fila entre' }, h('h2', {}, 'Categorías de cuota'), h('button', { class: 'chico', onclick: () => editarCat() }, 'Nueva')),
+        h('p', { class: 'small muted' }, 'La cuota de las categorías reducidas se redondea siempre a $100.'),
         h(
           'table',
           {},
@@ -734,7 +750,7 @@ async function vistaConfig() {
                 {},
                 h('td', {}, cat.nombre),
                 h('td', { class: 'num' }, Number(cat.porcentaje.toFixed(2)).toLocaleString('es-AR')),
-                h('td', { class: 'num' }, plata(Math.round((base / 100) * (cat.porcentaje / 100)) * 100)),
+                h('td', { class: 'num' }, plata(cat.porcentaje === 100 ? base : Math.round(((base / 100) * (cat.porcentaje / 100)) / 100) * 10000)),
                 h('td', { class: 'num' }, cat.miembros),
                 h('td', { class: 'num' }, h('button', { class: 'chico', onclick: () => editarCat(cat) }, 'Editar'), ' ', cat.miembros === 0 && h('button', { class: 'chico peligro', onclick: () => intentar(async () => (await api('DELETE', `/categorias/${cat.id}`), render())) }, 'Borrar'))
               )
@@ -841,10 +857,27 @@ function panelImportar() {
       )
     );
   });
+  const respaldo = h('input', { type: 'file', accept: '.db' });
+  respaldo.addEventListener('change', () =>
+    intentar(async () => {
+      const f = respaldo.files[0];
+      if (!f) return;
+      if (!confirm(`¿Restaurar los datos desde "${f.name}"? Se cargan el padrón, los movimientos y la configuración de ese respaldo.`)) return (respaldo.value = '');
+      const r = await fetch('/api/restaurar', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f });
+      const d = await r.json().catch(() => null);
+      respaldo.value = '';
+      if (!r.ok) throw new Error(d?.error || `Error ${r.status}`);
+      toast(`Respaldo restaurado: ${d.miembros} miembros`);
+      location.hash = '#/';
+    })
+  );
   return h(
     'div',
     { class: 'panel' },
-    h('h2', {}, 'Importar desde la planilla'),
+    h('h2', {}, 'Restaurar desde un respaldo'),
+    h('p', { class: 'small muted' }, 'Solo funciona con el sistema vacío. Elegí un archivo .db bajado con "Descargar respaldo" (por ejemplo, el de otra instalación). Se traen el padrón, los movimientos y la configuración; los usuarios no.'),
+    respaldo,
+    h('h2', { style: 'margin-top:22px' }, 'Importar desde la planilla'),
     h('p', { class: 'small muted' }, 'Solo funciona con el sistema vacío. En Google Sheets abrí la hoja "Resumen" → Archivo → Descargar → Valores separados por comas (.csv) y elegí ese archivo acá. Se traen el padrón, las categorías, la cuota y el saldo actual de cada miembro, de la caja y del Saco.'),
     archivo,
     zona

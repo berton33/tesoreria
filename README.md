@@ -47,6 +47,25 @@ queda en la planilla original como archivo.
 
 No subas el CSV al repositorio (el `.gitignore` ya excluye `*.csv`).
 
+## Llevar los datos de una instalación a otra
+
+Para pasar los datos de la copia local al servidor (o al revés):
+
+1. En la instalación de origen: Configuración → **Descargar respaldo** (baja un archivo `.db`).
+2. En la instalación de destino, recién desplegada y vacía: Configuración → **Restaurar desde un respaldo** → elegí ese archivo.
+
+Se copian el padrón, las categorías, los movimientos y la configuración. Los usuarios no se copian.
+
+## Reglas de negocio
+
+- **Cambio de cuota:** al cambiar el valor de la cuota, la deuda pendiente de cada miembro se actualiza
+  en la misma proporción (quien debía 3 cuotas sigue debiendo 3 cuotas). Los saldos a favor quedan en pesos.
+- **Categorías reducidas:** su cuota se redondea siempre a $100.
+- **Devengamiento:** no se duplica para un mismo mes, y no vuelve a cargar la cuota a quien se le anuló
+  a mano (por ejemplo, porque el mes lo cubría la iniciación).
+- **Aranceles** (iniciación, aumento de salario, exaltación): se cargan como "Otro ingreso" con el nombre
+  del miembro en el concepto; no pasan por su cuenta de cuotas.
+
 ## Desarrollo local
 
 ```bash

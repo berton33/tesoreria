@@ -16,6 +16,8 @@ export const TIPOS = {
   otro_ingreso: { nombre: 'Otro ingreso', caja: 1 },
   saco_ingreso: { nombre: 'Ingreso Saco de la Viuda', saco: 1 },
   saco_egreso: { nombre: 'Egreso Saco de la Viuda', saco: -1 },
+  // Lo genera el sistema cuando cambia el valor de la cuota (ver cambiarCuota).
+  actualizacion_cuota: { nombre: 'Actualización por cambio de cuota', miembro: true, mbr: 1, signo: true, sistema: true },
   // Ajustes: aceptan importe con signo. Se usan para saldos iniciales y correcciones.
   ajuste_miembro: { nombre: 'Ajuste de cuenta de miembro', miembro: true, mbr: 1, signo: true },
   ajuste_caja: { nombre: 'Ajuste de caja', caja: 1, signo: true },
@@ -43,8 +45,11 @@ export function aCentavos(v) {
   return Number.isFinite(n) ? Math.round(n * 100) : NaN;
 }
 
+/** Cuota de una categoría, en centavos. Las categorías reducidas se redondean a $100. */
 export function cuotaDe(baseCent, porcentaje) {
-  return Math.round((baseCent / 100) * (porcentaje / 100)) * 100;
+  if (porcentaje === 100) return baseCent;
+  const pesos = (baseCent / 100) * (porcentaje / 100);
+  return Math.round(pesos / 100) * 100 * 100;
 }
 
 // ---------- Miembros ----------
@@ -293,9 +298,9 @@ export function devengar(periodo, usuario) {
       `INSERT INTO movimientos (fecha, tipo, miembro_id, concepto, periodo, efecto_miembro, usuario, creado_en)
        VALUES (?, 'devengo', ?, ?, ?, ?, ?, ?)`
     );
-    const ya = db.prepare(
-      `SELECT 1 FROM movimientos WHERE miembro_id = ? AND periodo = ? AND tipo = 'devengo' AND anulado = 0`
-    );
+    // Cuenta también los anulados: si a un miembro se le anuló a mano la cuota de un mes
+    // (por ejemplo, porque la cubría la iniciación), el devengo masivo no se la vuelve a cargar.
+    const ya = db.prepare(`SELECT 1 FROM movimientos WHERE miembro_id = ? AND periodo = ? AND tipo = 'devengo'`);
     for (const m of listarMiembros()) {
       if (m.estado !== 'activo') continue;
       const cuota = cuotaDe(base, m.porcentaje);
@@ -324,6 +329,50 @@ export function devengoAutomaticoPendiente() {
     return null;
   }
   return periodo;
+}
+
+// ---------- Cambio del valor de la cuota ----------
+// La deuda se entiende en cuotas: si la cuota cambia, toda la deuda pendiente se
+// actualiza en la misma proporción (quien debía 3 cuotas sigue debiendo 3 cuotas).
+// Los saldos a favor quedan en pesos.
+
+function ajustesPorCambioCuota(nuevaCent) {
+  const vieja = Number(getConfig().cuota_base);
+  if (!(nuevaCent > 0)) throw new ErrorUsuario('Valor de cuota inválido');
+  const ajustes = [];
+  if (nuevaCent === vieja || !(vieja > 0)) return { vieja, ajustes };
+  for (const m of listarMiembros()) {
+    if (m.saldo >= 0) continue;
+    const nuevoSaldo = Math.round((m.saldo * nuevaCent) / vieja / 100) * 100; // sin centavos
+    if (nuevoSaldo !== m.saldo) ajustes.push({ id: m.id, nombre: `${m.apellido}, ${m.nombre}`, antes: m.saldo, despues: nuevoSaldo });
+  }
+  return { vieja, ajustes };
+}
+
+export function previsualizarCambioCuota(nuevaCent) {
+  const { vieja, ajustes } = ajustesPorCambioCuota(nuevaCent);
+  return {
+    cuota_actual: vieja,
+    cuota_nueva: nuevaCent,
+    afectados: ajustes.length,
+    diferencia: ajustes.reduce((s, a) => s + (a.antes - a.despues), 0), // positivo = la deuda total sube
+    detalle: ajustes,
+  };
+}
+
+export function cambiarCuota(nuevaCent, usuario) {
+  const pesos = (c) => '$' + (c / 100).toLocaleString('es-AR');
+  return tx(() => {
+    const { vieja, ajustes } = ajustesPorCambioCuota(nuevaCent);
+    const ins = db.prepare(
+      `INSERT INTO movimientos (fecha, tipo, miembro_id, concepto, efecto_miembro, usuario, creado_en)
+       VALUES (?, 'actualizacion_cuota', ?, ?, ?, ?, ?)`
+    );
+    const concepto = `Cambio de cuota ${pesos(vieja)} → ${pesos(nuevaCent)}`;
+    for (const a of ajustes) ins.run(hoy(), a.id, concepto, a.despues - a.antes, usuario || '', ahoraISO());
+    setConfig('cuota_base', nuevaCent);
+    return ajustes.length;
+  });
 }
 
 // ---------- Informe mensual ----------
